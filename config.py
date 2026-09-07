@@ -13,21 +13,37 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 PHOTO_DIR = DATA_DIR / "photos"
+INBOX_DIR = PHOTO_DIR / "inbox"        # foto baru, sebelum user pilih R atau K
 EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "reimbursement.db"
 
-for _d in (DATA_DIR, PHOTO_DIR, EXPORT_DIR):
+# --- Jenis pembayaran ----------------------------------------------------
+PAYMENT_REIMBURSEMENT = "reimbursement"
+PAYMENT_CREDIT_CARD = "kartu_kredit"
+
+# Nama sheet di Excel.
+SHEET_NAMES = {
+    PAYMENT_REIMBURSEMENT: "Reimbursement",
+    PAYMENT_CREDIT_CARD: "Kartu Kredit",
+}
+
+# Folder penyimpanan foto: File R untuk reimbursement, File K untuk kartu kredit.
+PHOTO_FOLDERS = {
+    PAYMENT_REIMBURSEMENT: PHOTO_DIR / "R",
+    PAYMENT_CREDIT_CARD: PHOTO_DIR / "K",
+}
+
+for _d in (DATA_DIR, PHOTO_DIR, INBOX_DIR, EXPORT_DIR, *PHOTO_FOLDERS.values()):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- Kredensial ----------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # --- Akses ---------------------------------------------------------------
-# Daftar telegram_user_id yang boleh memakai bot, dipisah koma.
-# Sengaja kosong secara default: bot menolak semua orang sampai diisi.
 def _parse_ids(raw: str) -> set[int]:
-    return {int(x.strip()) for x in raw.split(",") if x.strip().isdigit()}
+    return {int(x.strip()) for x in raw.split(",") if x.strip().lstrip("-").isdigit()}
 
 
 ALLOWED_USER_IDS = _parse_ids(os.getenv("ALLOWED_TELEGRAM_USER_IDS", ""))
@@ -38,44 +54,42 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAIL_FROM = os.getenv("EMAIL_FROM", SMTP_USER)
-# Penerima rekap (petugas yang mengumpulkan semua). Boleh lebih dari satu, dipisah koma.
 EMAIL_TO = [e.strip() for e in os.getenv("EMAIL_TO", "").split(",") if e.strip()]
 
-# --- Bisnis --------------------------------------------------------------
+# --- Identitas karyawan (mengisi kepala form Excel) ----------------------
+KARYAWAN_NAMA = os.getenv("KARYAWAN_NAMA", "")
+KARYAWAN_NPK = os.getenv("KARYAWAN_NPK", "")
+KARYAWAN_JABATAN = os.getenv("KARYAWAN_JABATAN", "")
+KARYAWAN_DEPARTEMEN = os.getenv("KARYAWAN_DEPARTEMEN", "")
+PERUSAHAAN = os.getenv("PERUSAHAAN", "")
+
+# Nilai default kolom yang jarang berubah, supaya user tidak perlu mengetiknya tiap kali.
+DEFAULT_TIPE = os.getenv("DEFAULT_TIPE", "meal")
+DEFAULT_TUJUAN = os.getenv("DEFAULT_TUJUAN", "Maintain/Build Relation")
+
 CURRENCY = os.getenv("CURRENCY", "IDR")
-COMPANY_NAME = os.getenv("COMPANY_NAME", "")
 
-# Dua jenis pembayaran = dua sheet di Excel.
-PAYMENT_REIMBURSEMENT = "reimbursement"
-PAYMENT_CREDIT_CARD = "kartu_kredit"
-
-SHEET_NAMES = {
-    PAYMENT_REIMBURSEMENT: "Reimbursement",
-    PAYMENT_CREDIT_CARD: "Kartu Kredit",
-}
+# Jumlah baris kosong yang tetap dicetak di form, meniru template asli.
+FORM_MIN_ROWS = int(os.getenv("FORM_MIN_ROWS", "20"))
 
 CATEGORIES = [
+    "Restaurant",
+    "Hotel",
     "Transportasi",
-    "Akomodasi",
-    "Makan & Entertain",
     "Perlengkapan Kantor",
     "Komunikasi",
     "Kesehatan",
-    "Pelatihan & Seminar",
     "Lain-lain",
 ]
 
-# Batas ukuran foto yang diterima (Telegram sendiri membatasi ~20 MB).
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 
 def missing_settings() -> list[str]:
-    """Kembalikan daftar setting wajib yang belum diisi, untuk dicek saat startup."""
-    missing = []
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
-        missing.append("ANTHROPIC_API_KEY")
-    if not ALLOWED_USER_IDS:
-        missing.append("ALLOWED_TELEGRAM_USER_IDS")
-    return missing
+    """Setting wajib yang belum diisi, dicek saat bot dinyalakan."""
+    required = {
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+        "OPENAI_API_KEY": OPENAI_API_KEY,
+        "ALLOWED_TELEGRAM_USER_IDS": ALLOWED_USER_IDS,
+    }
+    return [name for name, value in required.items() if not value]

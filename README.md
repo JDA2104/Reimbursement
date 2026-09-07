@@ -1,7 +1,7 @@
 # 🧾 Sistem Otomasi Reimbursement
 
-Foto struk lewat Telegram → dibaca otomatis oleh Claude → masuk rekap Excel 2 sheet
-(**Reimbursement** & **Kartu Kredit**) lengkap dengan foto strukanya → dikirim via email
+Foto struk lewat Telegram → dibaca otomatis oleh OpenAI → masuk form Excel
+**Daftar Nominatif** (2 sheet: Reimbursement & Kartu Kredit) → dikirim via email
 ke petugas pengumpul saat kamu memberi perintah.
 
 - **Author:** Juan Davis
@@ -9,24 +9,74 @@ ke petugas pengumpul saat kamu memberi perintah.
 
 ---
 
-## Alur Kerja
+## Tiga Tahap
 
 ```mermaid
-flowchart LR
-    U[Karyawan] -->|Foto struk| TG[Telegram Bot]
-    TG --> EX[Claude Opus 5<br/>baca struk]
-    EX --> CF{Reimbursement<br/>atau Kartu Kredit?}
-    CF -->|user pilih tombol| DB[(SQLite)]
-    DB --> XL[Excel 2 sheet<br/>+ thumbnail struk]
-    DB --> ZP[ZIP foto<br/>resolusi penuh]
-    XL --> KIRIM["/kirim"]
-    ZP --> KIRIM
-    KIRIM --> MAIL[Email ke petugas]
+flowchart TD
+    A[Terima invoice] -->|Foto via Telegram| B[OpenAI baca struk]
+    B --> C{Reimbursement<br/>atau Kartu Kredit?}
+    C -->|💵 R| D[Foto disimpan<br/>di folder R]
+    C -->|💳 K| E[Foto disimpan<br/>di folder K]
+    D --> F[Bot minta 1 kalimat detail]
+    E --> F
+    F -->|"Chen Yifei dari JA Solar,<br/>Executive, industri pendidikan"| G[AI pilah ke kolom form]
+    G --> H[(SQLite)]
+    H --> I[Form Excel 2 sheet]
+    H --> J[ZIP foto struk]
+    I --> K["/kirim"]
+    J --> K
+    K --> L[Email ke petugas]
 ```
 
-**SQLite adalah sumber kebenaran, bukan Excel.** File Excel di-generate ulang setiap kali
-ada entri baru atau dihapus. Artinya file rekap selalu akurat, tidak pernah korup karena
-ditulis bersamaan, dan bisa dibuat ulang kapan saja untuk periode mana pun.
+**Tahap 1 — Capture.** Foto struk → dibaca: tanggal, merchant, alamat, kategori, jumlah.
+Kamu pilih Reimbursement atau Kartu Kredit; foto langsung dipindah ke folder **R** atau **K**.
+
+**Tahap 2 — Lengkapi.** Bot minta satu kalimat bebas, contoh:
+
+> *Chen Yifei dan Huang Xinmin dari JA Solar, Executive, industri pendidikan, yang ikut Ariadi, Alex Janu, Galih*
+
+AI memilahnya ke kolom Nama / Posisi / Perusahaan / Industri / Karyawan Internal.
+Untuk struk non-jamuan (taksi, bensin, ATK) ketik `-` saja — kolom tamu dikosongkan.
+
+**Tahap 3 — Kirim.** `/kirim` → konfirmasi → form Excel + ZIP foto dikirim ke email
+yang terdaftar di `EMAIL_TO`.
+
+---
+
+## Bentuk Form Excel
+
+Meniru template Daftar Nominatif perusahaan, dua sheet dengan struktur identik:
+
+```
+                          FORM REIMBURSEMENT
+                          Periode Agustus 2026
+
+NPK        : 1908005
+JABATAN    : Directur                    setelah karyawan selesai melakukan
+DEPARTEMEN : BOD                         perjalanan dinas dengan melampirkan
+PERUSAHAAN : PT. Triputra Energi ...     semua bukti transaksi asli
+
+┌────┬──────────┬──────────────────────────────┬──────────────────────┬────────┬────────┬──────────┐
+│ NO │ Tanggal  │      Orang yang dijamu       │ Menjamu klien/mitra  │ Tujuan │ Jumlah │ Karyawan │
+│    │          ├───────┬───────┬────────┬─────┼───────┬───────┬──────┤        │        │ Internal │
+│    │          │ Nama  │Posisi │Perush. │Indus│Lokasi │Alamat │ Tipe │        │        │          │
+└────┴──────────┴───────┴───────┴────────┴─────┴───────┴───────┴──────┴────────┴────────┴──────────┘
+
+                                              SUB TOTAL              9,205,000
+                                              GRAND TOTAL        Rp  9,205,000
+                                              PEMBAYARAN DIMUKA  Rp          0
+                                              SALDO AKHIR        Rp  9,205,000
+
+  Diajukan oleh,        Disetujui oleh,          Diketahui oleh,
+  Karyawan              Atasan                   HRGA Senior Manager
+```
+
+**Merchant dari struk masuk ke kolom `Lokasi`** — di form aslimu kolom itu memang berisi
+nama restoran (Remboelan, Pagi Sore, Ko.Kuu).
+
+Foto **tidak** disisipkan ke dalam form, supaya layout dokumen resmi tidak berubah.
+Foto dikirim terpisah dalam ZIP, dinamai sesuai nomor barisnya —
+`Reimbursement/003_2026-08-18_Lapis - Lapis.jpg` = baris 3 di sheet Reimbursement.
 
 ---
 
@@ -34,21 +84,27 @@ ditulis bersamaan, dan bisa dibuat ulang kapan saja untuk periode mana pun.
 
 | File | Fungsi |
 |---|---|
-| [bot.py](bot.py) | Bot Telegram — handler foto, command, tombol inline |
-| [extractor.py](extractor.py) | Baca struk dengan Claude vision → objek Pydantic tervalidasi |
-| [excel_report.py](excel_report.py) | Bangun Excel 2 sheet + embed thumbnail + ZIP foto |
+| [bot.py](bot.py) | Bot Telegram — alur 3 tahap, command, tombol inline |
+| [extractor.py](extractor.py) | OpenAI vision (baca struk) + pemilah kalimat bebas |
+| [excel_report.py](excel_report.py) | Bangun form Excel 2 sheet + ZIP foto |
 | [db.py](db.py) | Skema & query SQLite |
-| [mailer.py](mailer.py) | Kirim rekap via SMTP dengan lampiran |
+| [mailer.py](mailer.py) | Kirim form via SMTP dengan lampiran |
 | [config.py](config.py) | Semua setting, dibaca dari `.env` |
 
 Data tersimpan di `data/` (otomatis dibuat, sudah di-`.gitignore`):
 
 ```
 data/
-├── reimbursement.db          # database
-├── photos/2026-09/*.jpg      # foto struk asli, per bulan
-└── exports/                  # Rekap_Pengeluaran_2026-09.xlsx, Struk_2026-09.zip
+├── reimbursement.db
+├── photos/
+│   ├── inbox/          # sementara, sebelum user pilih R atau K
+│   ├── R/2026-08/      # Reimbursement
+│   └── K/2026-08/      # Kartu Kredit
+└── exports/            # Reimbursement Juan Davis Aug 2026.xlsx, Struk_2026-08.zip
 ```
+
+**SQLite adalah sumber kebenaran, bukan Excel.** File Excel di-generate ulang setiap
+ada entri baru atau dihapus, jadi rekap selalu akurat dan bisa dibuat ulang kapan saja.
 
 ---
 
@@ -65,18 +121,7 @@ pip install -r requirements.txt
 
 ### 2. Buat bot Telegram
 
-Chat **@BotFather** di Telegram → `/newbot` → ikuti instruksi → salin token yang diberikan.
-
-Opsional, daftarkan menu perintah lewat `/setcommands`:
-
-```
-rekap - Ringkasan pengeluaran bulan ini
-excel - Kirim file Excel ke chat
-kirim - Email rekap ke petugas
-list - 10 entri terakhir
-hapus - Hapus satu entri
-help - Bantuan
-```
+Chat **@BotFather** → `/newbot` → salin token.
 
 ### 3. Isi konfigurasi
 
@@ -85,10 +130,12 @@ copy .env.example .env
 notepad .env
 ```
 
-Isi minimal `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, dan `ALLOWED_TELEGRAM_USER_IDS`.
+Wajib: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `ALLOWED_TELEGRAM_USER_IDS`.
+Isi juga identitas karyawan (`KARYAWAN_NPK`, `KARYAWAN_JABATAN`, dst) — itu yang
+mengisi kepala form Excel.
 
-> **Belum tahu Telegram user ID kamu?** Isi `ALLOWED_TELEGRAM_USER_IDS=0` dulu, jalankan bot,
-> kirim `/start` — bot akan membalas dengan ID kamu. Masukkan ID itu ke `.env`, lalu restart bot.
+> **Belum tahu Telegram user ID kamu?** Isi `ALLOWED_TELEGRAM_USER_IDS=0` dulu,
+> jalankan bot, kirim `/start` — bot membalas dengan ID kamu. Masukkan ke `.env`, restart.
 
 ### 4. Jalankan
 
@@ -96,47 +143,23 @@ Isi minimal `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, dan `ALLOWED_TELEGRAM_USE
 python bot.py
 ```
 
-Bot memakai **long polling**, jadi tidak butuh server publik atau domain. Cukup jalan di
+Bot memakai **long polling** — tidak butuh server publik atau domain. Cukup jalan di
 laptop atau PC kantor yang menyala.
 
 ---
 
-## Cara Pakai
-
-1. **Foto struk** → kirim ke bot.
-2. Bot balas hasil bacaan: merchant, tanggal, kategori, total, PPN.
-3. Tekan tombol **💵 Reimbursement** atau **💳 Kartu Kredit**.
-   Bot menebak dari struk (kalau ada jejak EDC/kartu, tombol Kartu Kredit ditaruh duluan),
-   tapi keputusan akhir tetap di kamu — struk tidak selalu menunjukkan siapa yang membayar.
-4. Entri masuk database, Excel langsung diperbarui.
-5. Saat rekap siap: **`/kirim`** → konfirmasi → email terkirim dengan lampiran Excel + ZIP foto.
-
-### Perintah
+## Perintah
 
 | Perintah | Fungsi |
 |---|---|
-| `/rekap` | Ringkasan bulan ini di chat |
-| `/rekap 2026-08` | Ringkasan bulan tertentu |
-| `/excel` | Kirim file Excel + ZIP ke chat ini |
-| `/kirim` | Email rekap ke `EMAIL_TO` (minta konfirmasi dulu) |
-| `/list` | 10 entri terakhir milikmu, beserta ID-nya |
+| *(kirim foto)* | Catat struk baru |
+| `/rekap` | Ringkasan bulan ini |
+| `/rekap 2026-07` | Ringkasan bulan tertentu |
+| `/excel` | Kirim form Excel + ZIP ke chat ini |
+| `/kirim` | Email form ke `EMAIL_TO` (minta konfirmasi dulu) |
+| `/list` | 10 entri terakhir beserta ID-nya |
 | `/hapus 12` | Hapus entri `#12` |
-
----
-
-## Isi File Excel
-
-Dua sheet, masing-masing dengan kolom:
-
-| No | Tanggal | Merchant | Deskripsi | Kategori | Subtotal | PPN | Total | Pemohon | Struk |
-|---|---|---|---|---|---|---|---|---|---|
-
-- Kolom **Struk** berisi thumbnail foto langsung di dalam sel — reviewer tidak perlu
-  buka file lain untuk memverifikasi.
-- Baris **TOTAL** otomatis di bawah.
-- Header di-*freeze* dan ada filter, jadi mudah disortir.
-- Foto resolusi penuh ikut terkirim dalam ZIP terpisah, dinamai
-  `Reimbursement/001_2026-09-03_Grab_id12.jpg` agar mudah dicocokkan dengan barisnya.
+| `/batal` | Batalkan struk yang sedang ditanyakan |
 
 ---
 
@@ -146,21 +169,11 @@ Sistem ini menyimpan data finansial asli, jadi:
 
 - **`.env` dan `data/` tidak pernah masuk git** — sudah diatur di `.gitignore`.
 - Bot memakai **allowlist**: hanya user ID di `ALLOWED_TELEGRAM_USER_IDS` yang dilayani.
-  Default-nya kosong, artinya menolak semua orang sampai sengaja diisi.
+  Default kosong, artinya menolak semua orang sampai sengaja diisi — bot Telegram itu
+  publik, siapa pun yang tahu namanya bisa mengirim chat.
 - Struk duplikat ditolak otomatis lewat hash SHA-256 file foto.
-- Hapus bersifat **soft delete** — data tetap ada di database untuk jejak audit,
-  hanya tidak muncul di rekap.
+- Hapus bersifat **soft delete** — data tetap ada di database untuk jejak audit.
 - Untuk Gmail, gunakan **App Password**, bukan password akun utama.
-
----
-
-## Kategori Pengeluaran
-
-`Transportasi`, `Akomodasi`, `Makan & Entertain`, `Perlengkapan Kantor`,
-`Komunikasi`, `Kesehatan`, `Pelatihan & Seminar`, `Lain-lain`
-
-Ubah daftarnya di `CATEGORIES` pada [config.py](config.py) — prompt ke Claude ikut
-menyesuaikan otomatis.
 
 ---
 
@@ -168,8 +181,8 @@ menyesuaikan otomatis.
 
 | Ide | Kenapa berguna |
 |---|---|
-| Import Excel/CSV & email | Sudah disebut sebagai input, belum diimplementasi |
-| Approval atasan | Tombol approve/reject sebelum masuk rekap final |
-| Deteksi limit kebijakan | Warning kalau nominal melebihi batas per kategori |
-| Jadwal otomatis | Kirim rekap tiap tanggal 25 tanpa perlu `/kirim` manual |
-| Export format accounting | Sesuaikan kolom dengan template SAP/Accurate |
+| Ingat profil tamu | Ketik "Chen Yifei" saja, posisi/perusahaan/industri terisi otomatis |
+| Import Excel/CSV | Input massal untuk struk yang sudah terlanjur dicatat manual |
+| Baca dari email | Invoice yang masuk lewat email ikut terproses otomatis |
+| Edit lewat chat | `/edit 12 jumlah 500000` tanpa perlu buka Excel |
+| Jadwal otomatis | Kirim form tiap tanggal 25 tanpa `/kirim` manual |

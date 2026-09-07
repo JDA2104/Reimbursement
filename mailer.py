@@ -61,15 +61,17 @@ def _body(period: str) -> str:
         grand_total += stats["total"]
     lines += [
         "",
-        f"  {'TOTAL':<16} : {config.CURRENCY} {grand_total:,.0f}",
+        f"  {'GRAND TOTAL':<16} : {config.CURRENCY} {grand_total:,.0f}",
         "",
         "Lampiran:",
-        "  - File Excel berisi 2 sheet (Reimbursement & Kartu Kredit), "
-        "lengkap dengan foto struk di tiap baris.",
-        "  - File ZIP berisi foto struk resolusi penuh.",
+        "  - Form Excel berisi 2 sheet: Reimbursement dan Kartu Kredit.",
+        "  - File ZIP berisi foto struk. Nomor di depan nama file sesuai nomor",
+        "    baris di sheet yang bersangkutan, contoh Reimbursement/003_... = baris 3.",
         "",
         "Dikirim otomatis oleh bot reimbursement.",
     ]
+    if config.KARYAWAN_NAMA:
+        lines.insert(1, f"Karyawan: {config.KARYAWAN_NAMA} ({config.KARYAWAN_NPK})")
     return "\n".join(lines)
 
 
