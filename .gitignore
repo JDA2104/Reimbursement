@@ -14,5 +14,8 @@ env/
 .vscode/
 .idea/
 
-# Data
+# Data — berisi struk & nominal pengeluaran asli, jangan pernah di-push
+data/
+*.db
+*.xlsx
 *.log
