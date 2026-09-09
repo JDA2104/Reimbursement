@@ -33,6 +33,7 @@ import db
 import excel_report
 import extractor
 import mailer
+import receipt_image
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s", level=logging.INFO
@@ -96,7 +97,8 @@ Setelah itu ketik satu kalimat berisi detail jamuan (atau `-` kalau bukan jamuan
 
 *Perintah:*
 /rekap `[YYYY-MM]` — ringkasan bulan ini
-/excel `[YYYY-MM]` — kirim form Excel + foto ke chat ini
+/excel `[YYYY-MM]` — kirim form Excel + lampiran struk ke chat ini
+/lembar `[YYYY-MM]` — lembar struk saja (PDF, urut tanggal, siap cetak)
 /kirim `[YYYY-MM]` — email form ke petugas pengumpul
 /list — 10 entri terakhir
 /hapus `<id>` — hapus satu entri
@@ -158,16 +160,43 @@ async def cmd_excel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
     excel_path, zip_path = await asyncio.to_thread(excel_report.build_all, period)
+    pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period)
 
     await update.message.reply_document(
         document=excel_path.open("rb"), filename=excel_path.name,
         caption=f"📗 Form {excel_report.period_label(period)}",
     )
+    if pdf_path is not None:
+        await update.message.reply_document(
+            document=pdf_path.open("rb"), filename=pdf_path.name,
+            caption="📄 Lampiran struk — sudah dipotong & urut tanggal, siap cetak",
+        )
     if zip_path is not None:
         await update.message.reply_document(
             document=zip_path.open("rb"), filename=zip_path.name,
-            caption="🖼 Foto struk (nomor file = nomor baris di form)",
+            caption="🖼 Foto asli resolusi penuh (untuk audit)",
         )
+
+
+async def cmd_lembar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kirim hanya lembar lampiran struk, tanpa Excel."""
+    if not is_allowed(update):
+        return await deny(update)
+
+    period = parse_period(context.args)
+    await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+    pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period)
+
+    if pdf_path is None:
+        await update.message.reply_text(
+            f"Belum ada struk untuk {excel_report.period_label(period)}."
+        )
+        return
+
+    await update.message.reply_document(
+        document=pdf_path.open("rb"), filename=pdf_path.name,
+        caption=f"📄 Lampiran struk {excel_report.period_label(period)} — urut tanggal",
+    )
 
 
 async def cmd_kirim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -507,8 +536,9 @@ async def _send_email(query, period: str) -> None:
 
     try:
         excel_path, zip_path = await asyncio.to_thread(excel_report.build_all, period)
+        pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period)
         recipients = await asyncio.to_thread(
-            mailer.send_report, period, excel_path, zip_path,
+            mailer.send_report, period, excel_path, zip_path, pdf_path,
             query.from_user.full_name or "",
         )
     except mailer.MailNotConfigured as exc:
@@ -546,6 +576,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("rekap", cmd_rekap))
     app.add_handler(CommandHandler("excel", cmd_excel))
+    app.add_handler(CommandHandler("lembar", cmd_lembar))
     app.add_handler(CommandHandler("kirim", cmd_kirim))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("hapus", cmd_hapus))
@@ -553,6 +584,13 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Python 3.12+ tidak lagi membuat event loop otomatis di main thread,
+    # sementara run_polling() masih memanggil asyncio.get_event_loop().
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     log.info("Bot berjalan. Tekan Ctrl+C untuk berhenti.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
