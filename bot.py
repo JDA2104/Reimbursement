@@ -73,20 +73,65 @@ def parse_period(args: list[str]) -> str:
     return current_period()
 
 
-def is_allowed(update: Update) -> bool:
+def caller_id(update: Update) -> int | None:
     user = update.effective_user
-    return user is not None and user.id in config.ALLOWED_USER_IDS
+    return user.id if user else None
+
+
+def is_allowed(update: Update) -> bool:
+    """Akses ditentukan tabel users, bukan .env - supaya admin bisa
+    menambah dan mencabut tanpa menyunting berkas atau me-restart bot."""
+    uid = caller_id(update)
+    if uid is None:
+        return False
+    row = db.get_user(uid)
+    return row is not None and row["status"] == db.STATUS_ACTIVE
+
+
+def is_admin(update: Update) -> bool:
+    uid = caller_id(update)
+    if uid is None:
+        return False
+    row = db.get_user(uid)
+    return (row is not None and row["status"] == db.STATUS_ACTIVE
+            and row["role"] == db.ROLE_ADMIN)
 
 
 async def deny(update: Update) -> None:
-    user = update.effective_user
-    log.warning("Akses ditolak untuk user id=%s", user.id if user else "?")
-    await update.effective_message.reply_text(
-        "🚫 Kamu belum terdaftar sebagai pengguna bot ini.\n\n"
-        f"Telegram user ID kamu: `{user.id if user else '?'}`\n"
-        "Tambahkan ID itu ke `ALLOWED_TELEGRAM_USER_IDS` di file .env, lalu restart bot.",
-        parse_mode="Markdown",
-    )
+    """Balasan untuk yang belum berhak - isinya menyesuaikan status."""
+    uid = caller_id(update)
+    row = db.get_user(uid) if uid else None
+    status = row["status"] if row else None
+
+    if status == db.STATUS_PENDING:
+        pesan = ("⏳ Permintaan aksesmu sudah dikirim ke admin dan sedang menunggu "
+                 "persetujuan.\n\nKamu akan diberi tahu begitu disetujui.")
+    elif status == db.STATUS_REVOKED:
+        pesan = ("🚫 Aksesmu ke bot ini sudah dicabut.\n\n"
+                 "Hubungi admin kalau menurutmu ini keliru.")
+    else:
+        pesan = ("🚫 Kamu belum terdaftar.\n\n"
+                 "Kirim /start untuk meminta akses ke admin.")
+
+    log.warning("Akses ditolak untuk user id=%s (status=%s)", uid, status)
+    await update.effective_message.reply_text(pesan)
+
+
+async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str,
+                        markup: InlineKeyboardMarkup | None = None) -> int:
+    """Kirim pesan ke semua admin aktif. Kembalikan berapa yang berhasil."""
+    terkirim = 0
+    for admin_id in db.admin_ids():
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id, text=text,
+                parse_mode="Markdown", reply_markup=markup,
+            )
+            terkirim += 1
+        except Exception:
+            # Admin yang memblokir bot tidak boleh menggagalkan yang lain.
+            log.exception("Gagal memberi tahu admin %s", admin_id)
+    return terkirim
 
 
 def display_name(update: Update) -> str:
@@ -113,17 +158,216 @@ Setelah itu ketik satu kalimat berisi detail jamuan (atau `-` kalau bukan jamuan
 /kirim `[YYYY-MM]` — email form ke petugas pengumpul
 /list — 10 entri terakhir
 /hapus `<id>` — hapus satu entri
+/profil — lihat / isi NPK, jabatan, departemen
 /batal — batalkan struk yang sedang ditanyakan
 
 Tanpa argumen tanggal, semua perintah memakai bulan berjalan."""
 
 
+ADMIN_HELP = """
+
+*Perintah admin:*
+/users — daftar karyawan & statusnya
+/cabut `<id>` — cabut akses karyawan
+/aktifkan `<id>` — pulihkan akses
+/jadikanadmin `<id>` — beri hak admin"""
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pintu masuk semua orang: yang sudah aktif dapat menu, yang belum
+    otomatis mengajukan permintaan akses ke admin."""
+    user = update.effective_user
+    if user is None:
+        return
+
+    if is_allowed(update):
+        teks = f"Halo {display_name(update)} 👋\n\n" + HELP_TEXT
+        if is_admin(update):
+            teks += ADMIN_HELP
+        await update.message.reply_text(teks, parse_mode="Markdown")
+        return
+
+    status = db.request_access(user.id, display_name(update), user.username or "")
+
+    if status == db.STATUS_REVOKED:
+        return await deny(update)
+
+    if status == db.STATUS_PENDING:
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Setujui", callback_data=f"acc:ok:{user.id}"),
+            InlineKeyboardButton("❌ Tolak", callback_data=f"acc:no:{user.id}"),
+        ]])
+        terkirim = await notify_admins(
+            context,
+            "👤 *Permintaan akses baru*\n\n"
+            f"Nama : {display_name(update)}\n"
+            f"User : @{user.username or '—'}\n"
+            f"ID   : `{user.id}`",
+            markup,
+        )
+        if terkirim:
+            await update.message.reply_text(
+                "⏳ Permintaan aksesmu sudah dikirim ke admin.\n"
+                "Kamu akan diberi tahu begitu disetujui."
+            )
+        else:
+            # Tanpa admin aktif, permintaan tidak akan pernah diputuskan -
+            # lebih baik dikatakan terus terang daripada menunggu selamanya.
+            await update.message.reply_text(
+                "⚠️ Belum ada admin aktif di sistem ini, jadi permintaanmu "
+                "belum bisa diteruskan.\n\nHubungi pengelola bot secara langsung."
+            )
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        return await deny(update)
+
+    rows = db.list_users()
+    if not rows:
+        await update.message.reply_text("Belum ada karyawan terdaftar.")
+        return
+
+    tanda = {db.STATUS_PENDING: "⏳", db.STATUS_ACTIVE: "✅", db.STATUS_REVOKED: "🚫"}
+    lines = ["*Karyawan terdaftar:*", ""]
+    for r in rows:
+        mark = tanda.get(r["status"], "•")
+        gelar = " 👑" if r["role"] == db.ROLE_ADMIN else ""
+        lines.append(f"{mark} *{r['nama']}*{gelar}  `{r['telegram_user_id']}`")
+        detail = " · ".join(p for p in (r["npk"], r["jabatan"], r["departemen"]) if p)
+        if detail:
+            lines.append(f"      {detail}")
+        elif r["status"] == db.STATUS_ACTIVE:
+            lines.append("      _profil belum diisi_")
+
+    lines += ["", "`/cabut <id>` · `/aktifkan <id>` · `/jadikanadmin <id>`"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _ubah_status(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                       status: str, kata: str) -> None:
+    """Tulang punggung /cabut dan /aktifkan."""
+    if not is_admin(update):
+        return await deny(update)
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text(
+            f"Format: `/{kata} 89525770`\nLihat ID lewat /users", parse_mode="Markdown"
+        )
+        return
+
+    target = int(context.args[0].lstrip("#"))
+    row = db.get_user(target)
+    if row is None:
+        await update.message.reply_text(f"Karyawan `{target}` tidak ditemukan.",
+                                        parse_mode="Markdown")
+        return
+
+    if status == db.STATUS_REVOKED and target == caller_id(update):
+        await update.message.reply_text(
+            "Kamu tidak bisa mencabut aksesmu sendiri — nanti tidak ada yang "
+            "bisa mengelola bot ini."
+        )
+        return
+
+    if (status == db.STATUS_REVOKED and row["role"] == db.ROLE_ADMIN
+            and len(db.admin_ids()) <= 1):
+        await update.message.reply_text(
+            "Itu satu-satunya admin aktif. Angkat admin lain dulu sebelum "
+            "mencabut yang ini."
+        )
+        return
+
+    db.decide_access(target, status, caller_id(update))
+    await update.message.reply_text(
+        f"{'🚫 Akses dicabut' if status == db.STATUS_REVOKED else '✅ Akses dipulihkan'} "
+        f"untuk *{row['nama']}*.\n\n_Data dan struk lamanya tetap tersimpan._",
+        parse_mode="Markdown",
+    )
+
+    kabar = ("🚫 Aksesmu ke bot reimbursement telah dicabut oleh admin."
+             if status == db.STATUS_REVOKED else
+             "✅ Aksesmu telah dipulihkan. Kirim /start untuk mulai lagi.")
+    try:
+        await context.bot.send_message(chat_id=target, text=kabar)
+    except Exception:
+        log.warning("Tidak bisa memberi tahu karyawan %s", target)
+
+
+async def cmd_cabut(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _ubah_status(update, context, db.STATUS_REVOKED, "cabut")
+
+
+async def cmd_aktifkan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _ubah_status(update, context, db.STATUS_ACTIVE, "aktifkan")
+
+
+async def cmd_jadikanadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        return await deny(update)
+
+    if not context.args or not context.args[0].lstrip("#").isdigit():
+        await update.message.reply_text("Format: `/jadikanadmin 89525770`",
+                                        parse_mode="Markdown")
+        return
+
+    target = int(context.args[0].lstrip("#"))
+    row = db.get_user(target)
+    if row is None or row["status"] != db.STATUS_ACTIVE:
+        await update.message.reply_text(
+            "Karyawan itu belum terdaftar aktif. Setujui aksesnya dulu."
+        )
+        return
+
+    db.set_role(target, db.ROLE_ADMIN)
+    await update.message.reply_text(f"👑 *{row['nama']}* sekarang admin.",
+                                    parse_mode="Markdown")
+    try:
+        await context.bot.send_message(
+            chat_id=target,
+            text="👑 Kamu sekarang admin bot reimbursement. Kirim /start untuk "
+                 "melihat perintah tambahannya.",
+        )
+    except Exception:
+        log.warning("Tidak bisa memberi tahu admin baru %s", target)
+
+
+async def cmd_profil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lihat atau isi identitas yang mengisi kepala form Excel."""
     if not is_allowed(update):
         return await deny(update)
-    await update.message.reply_text(
-        f"Halo {display_name(update)} 👋\n\n" + HELP_TEXT, parse_mode="Markdown"
-    )
+
+    uid = caller_id(update)
+    teks = " ".join(context.args) if context.args else ""
+
+    if teks:
+        bagian = [b.strip() for b in teks.split("|")]
+        if len(bagian) < 3:
+            await update.message.reply_text(
+                "Format: `/profil <NPK> | <Jabatan> | <Departemen> | <Perusahaan>`\n\n"
+                "Contoh:\n`/profil 1908005 | President Director | BOD | "
+                "PT. Triputra Energi Megatara`",
+                parse_mode="Markdown",
+            )
+            return
+        bagian += [""] * (4 - len(bagian))
+        db.update_profile(uid, npk=bagian[0], jabatan=bagian[1],
+                          departemen=bagian[2], perusahaan=bagian[3])
+
+    row = db.get_user(uid)
+    kurang = [f for f in ("npk", "jabatan", "departemen") if not row[f]]
+    lines = [
+        "👤 *Profil kamu*", "",
+        f"Nama       : {row['nama']}",
+        f"NPK        : {row['npk'] or '—'}",
+        f"Jabatan    : {row['jabatan'] or '—'}",
+        f"Departemen : {row['departemen'] or '—'}",
+        f"Perusahaan : {row['perusahaan'] or '—'}",
+    ]
+    if kurang:
+        lines += ["", "⚠️ Kepala form Excel-mu akan kosong sampai ini diisi:",
+                  "`/profil 1908005 | President Director | BOD | PT. Triputra Energi Megatara`"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,7 +381,7 @@ async def cmd_rekap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return await deny(update)
 
     period = parse_period(context.args)
-    summary = db.summary_by_period(period)
+    summary = db.summary_by_period(period, caller_id(update))
 
     lines = [f"📊 *Rekap {excel_report.period_label(period)}*", ""]
     grand = 0.0
@@ -149,7 +393,7 @@ async def cmd_rekap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines += ["", f"*GRAND TOTAL: {money(grand)}*"]
 
-    belum = db.incomplete_count(update.effective_user.id)
+    belum = db.incomplete_count(caller_id(update))
     if belum:
         lines += ["", f"⚠️ {belum} struk belum lengkap datanya."]
     if grand > 0:
@@ -163,15 +407,16 @@ async def cmd_excel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return await deny(update)
 
     period = parse_period(context.args)
-    if not db.summary_by_period(period):
+    uid = caller_id(update)
+    if not db.summary_by_period(period, uid):
         await update.message.reply_text(
             f"Belum ada data untuk {excel_report.period_label(period)}."
         )
         return
 
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-    excel_path, zip_path = await asyncio.to_thread(excel_report.build_all, period)
-    pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period)
+    excel_path, zip_path = await asyncio.to_thread(excel_report.build_all, period, uid)
+    pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period, uid)
 
     await update.message.reply_document(
         document=excel_path.open("rb"), filename=excel_path.name,
@@ -241,13 +486,17 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return await deny(update)
 
     period = parse_period(context.args)
+    # Admin melihat seluruh karyawan; yang lain hanya dirinya sendiri.
+    lingkup = None if is_admin(update) else caller_id(update)
+
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-    path = await asyncio.to_thread(dashboard.build_dashboard, 6, period)
+    path = await asyncio.to_thread(dashboard.build_dashboard, 6, period, lingkup)
 
     await update.message.reply_document(
         document=path.open("rb"), filename=path.name,
-        caption=(f"📊 Dashboard {excel_report.period_label(period)}\n"
-                 "Buka dengan browser. Datanya tertanam di file, tidak ada yang diunggah."),
+        caption=(f"📊 Dashboard {excel_report.period_label(period)}"
+                 f" — {'semua karyawan' if lingkup is None else 'data kamu'}\n"
+                 "Buka dengan browser. Datanya tertanam di file."),
     )
 
 
@@ -258,7 +507,8 @@ async def cmd_lembar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     period = parse_period(context.args)
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-    pdf_path = await asyncio.to_thread(receipt_image.build_contact_sheet, period)
+    pdf_path = await asyncio.to_thread(
+        receipt_image.build_contact_sheet, period, caller_id(update))
 
     if pdf_path is None:
         await update.message.reply_text(
@@ -285,7 +535,7 @@ async def cmd_kirim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⚙️ {exc}")
         return
 
-    summary = db.summary_by_period(period)
+    summary = db.summary_by_period(period, caller_id(update))
     if not summary:
         await update.message.reply_text(
             f"Belum ada data untuk {excel_report.period_label(period)}."
@@ -348,7 +598,8 @@ async def cmd_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     db.soft_delete(expense_id)
-    await asyncio.to_thread(excel_report.build_workbook, row["period"])
+    await asyncio.to_thread(excel_report.build_workbook, row["period"],
+                            row["telegram_user_id"])
     await update.message.reply_text(f"🗑 Entri #{expense_id} ({row['merchant']}) dihapus.")
 
 
@@ -562,7 +813,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def _finish(update: Update, pending) -> None:
     """Tutup satu entri: bangun ulang Excel, lalu laporkan posisi terbaru."""
     row = db.get_expense(pending["id"])
-    await asyncio.to_thread(excel_report.build_workbook, row["period"])
+    await asyncio.to_thread(excel_report.build_workbook, row["period"],
+                            row["telegram_user_id"])
     await _push_to_cloud()
 
     sheet = config.SHEET_NAMES[row["payment_type"]]
@@ -586,6 +838,52 @@ async def _finish(update: Update, pending) -> None:
 
 # --- Tombol inline -------------------------------------------------------
 
+async def _putuskan_akses(query, context: ContextTypes.DEFAULT_TYPE,
+                          keputusan: str, target: int) -> None:
+    """Admin menekan Setujui / Tolak pada notifikasi permintaan akses."""
+    penekan = query.from_user.id
+    admin = db.get_user(penekan)
+    if admin is None or admin["role"] != db.ROLE_ADMIN or admin["status"] != db.STATUS_ACTIVE:
+        await query.edit_message_text("🚫 Hanya admin yang bisa memutuskan ini.")
+        return
+
+    row = db.get_user(target)
+    if row is None:
+        await query.edit_message_text("Permintaan itu sudah tidak ada.")
+        return
+
+    # Admin lain mungkin sudah memutuskan lebih dulu.
+    if row["status"] != db.STATUS_PENDING:
+        sudah = "disetujui" if row["status"] == db.STATUS_ACTIVE else "ditolak"
+        await query.edit_message_text(
+            f"ℹ️ Permintaan *{row['nama']}* sudah {sudah} sebelumnya.",
+            parse_mode="Markdown",
+        )
+        return
+
+    setuju = keputusan == "ok"
+    db.decide_access(target, db.STATUS_ACTIVE if setuju else db.STATUS_REVOKED, penekan)
+
+    await query.edit_message_text(
+        f"{'✅ Disetujui' if setuju else '❌ Ditolak'}: *{row['nama']}* "
+        f"(`{target}`)\n_oleh {admin['nama']}_",
+        parse_mode="Markdown",
+    )
+
+    kabar = (
+        "✅ Aksesmu disetujui!\n\nLangkah pertama: isi identitasmu supaya kepala "
+        "form Excel terisi benar —\n"
+        "`/profil <NPK> | <Jabatan> | <Departemen> | <Perusahaan>`\n\n"
+        "Setelah itu kirim /start untuk melihat semua perintah."
+        if setuju else
+        "❌ Permintaan aksesmu ditolak admin."
+    )
+    try:
+        await context.bot.send_message(chat_id=target, text=kabar, parse_mode="Markdown")
+    except Exception:
+        log.warning("Tidak bisa memberi tahu karyawan %s", target)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -595,6 +893,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     action, _, payload = query.data.partition(":")
+
+    # Persetujuan akses ditangani lebih dulu: penekannya harus admin, dan
+    # pemeriksaan is_allowed di bawah tidak berlaku untuk yang diputuskan.
+    if action == "acc":
+        keputusan, _, raw_id = payload.partition(":")
+        await _putuskan_akses(query, context, keputusan, int(raw_id))
+        return
 
     if action == "cancel":
         await query.edit_message_text("Dibatalkan.")
@@ -648,6 +953,15 @@ async def _send_email(query, period: str) -> None:
 def main() -> None:
     db.init()
 
+    # Semai admin pertama dari .env. Tanpa ini sistem persetujuan buntu:
+    # tidak ada yang berwenang menyetujui permintaan akses pertama.
+    for admin_id in config.ALLOWED_USER_IDS:
+        db.ensure_admin(admin_id)
+    if db.admin_ids():
+        log.info("Admin aktif: %s", db.admin_ids())
+    else:
+        log.warning("Belum ada admin. Isi ALLOWED_TELEGRAM_USER_IDS di .env.")
+
     missing = config.missing_settings()
     if missing:
         raise SystemExit(
@@ -664,6 +978,11 @@ def main() -> None:
     app.add_handler(CommandHandler("lembar", cmd_lembar))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("profil", cmd_profil))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("cabut", cmd_cabut))
+    app.add_handler(CommandHandler("aktifkan", cmd_aktifkan))
+    app.add_handler(CommandHandler("jadikanadmin", cmd_jadikanadmin))
     app.add_handler(CommandHandler("kirim", cmd_kirim))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("hapus", cmd_hapus))

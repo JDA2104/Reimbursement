@@ -61,7 +61,35 @@ CREATE TABLE IF NOT EXISTS photo_hashes (
     expense_id  INTEGER NOT NULL,
     created_at  TEXT    NOT NULL
 );
+
+-- Karyawan yang boleh memakai bot. Identitas tinggal di sini, bukan di .env,
+-- karena tiap orang punya NPK sendiri yang mengisi kepala form Excel-nya.
+CREATE TABLE IF NOT EXISTS users (
+    telegram_user_id INTEGER PRIMARY KEY,
+    nama             TEXT    NOT NULL,
+    username         TEXT    NOT NULL DEFAULT '',
+    npk              TEXT    NOT NULL DEFAULT '',
+    jabatan          TEXT    NOT NULL DEFAULT '',
+    departemen       TEXT    NOT NULL DEFAULT '',
+    perusahaan       TEXT    NOT NULL DEFAULT '',
+    role             TEXT    NOT NULL DEFAULT 'user',     -- 'admin' | 'user'
+    status           TEXT    NOT NULL DEFAULT 'pending',  -- 'pending' | 'active' | 'revoked'
+    created_at       TEXT    NOT NULL,
+    decided_at       TEXT    NOT NULL DEFAULT '',
+    decided_by       INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_status ON users (status);
 """
+
+STATUS_PENDING = "pending"
+STATUS_ACTIVE = "active"
+STATUS_REVOKED = "revoked"
+
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+
+PROFILE_FIELDS = ("npk", "jabatan", "departemen", "perusahaan")
 
 DETAIL_FIELDS = (
     "tamu_nama", "tamu_posisi", "tamu_perusahaan", "industri",
@@ -83,6 +111,110 @@ def connect() -> Iterator[sqlite3.Connection]:
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+
+
+# --- Karyawan ------------------------------------------------------------
+
+def get_user(telegram_user_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM users WHERE telegram_user_id = ?", (telegram_user_id,)
+        ).fetchone()
+
+
+def request_access(telegram_user_id: int, nama: str, username: str = "") -> str:
+    """Catat permintaan akses. Kembalikan status karyawan sesudahnya.
+
+    Aman dipanggil berulang: karyawan yang menekan /start dua kali tidak
+    menimpa status yang sudah diputuskan admin.
+    """
+    existing = get_user(telegram_user_id)
+    if existing is not None:
+        # Nama Telegram bisa berubah; ikutkan tanpa menyentuh status.
+        with connect() as conn:
+            conn.execute(
+                "UPDATE users SET nama = ?, username = ? WHERE telegram_user_id = ?",
+                (nama, username, telegram_user_id),
+            )
+        return existing["status"]
+
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO users (telegram_user_id, nama, username, status, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (telegram_user_id, nama, username, STATUS_PENDING,
+             datetime.now().isoformat(timespec="seconds")),
+        )
+    return STATUS_PENDING
+
+
+def decide_access(telegram_user_id: int, status: str, by_admin: int) -> None:
+    """Setujui, tolak, atau cabut akses. Baris karyawan tidak pernah dihapus."""
+    with connect() as conn:
+        conn.execute(
+            """UPDATE users SET status = ?, decided_at = ?, decided_by = ?
+               WHERE telegram_user_id = ?""",
+            (status, datetime.now().isoformat(timespec="seconds"),
+             by_admin, telegram_user_id),
+        )
+
+
+def set_role(telegram_user_id: int, role: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE users SET role = ? WHERE telegram_user_id = ?",
+            (role, telegram_user_id),
+        )
+
+
+def update_profile(telegram_user_id: int, **fields: Any) -> None:
+    """Isi NPK/jabatan/departemen/perusahaan yang mengisi kepala form Excel."""
+    updates = {k: v for k, v in fields.items() if k in PROFILE_FIELDS}
+    if not updates:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in updates)
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE users SET {assignments} WHERE telegram_user_id = ?",
+            (*updates.values(), telegram_user_id),
+        )
+
+
+def list_users(status: str | None = None) -> list[sqlite3.Row]:
+    query = "SELECT * FROM users"
+    params: list[Any] = []
+    if status:
+        query += " WHERE status = ?"
+        params.append(status)
+    query += " ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, nama"
+    with connect() as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def admin_ids() -> list[int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT telegram_user_id FROM users WHERE role = ? AND status = ?",
+            (ROLE_ADMIN, STATUS_ACTIVE),
+        ).fetchall()
+    return [int(r["telegram_user_id"]) for r in rows]
+
+
+def ensure_admin(telegram_user_id: int, nama: str = "Admin") -> None:
+    """Jadikan seseorang admin aktif. Dipakai untuk menyemai admin pertama.
+
+    Tanpa ini, sistem persetujuan menjadi buntu: tidak ada yang berwenang
+    menyetujui permintaan akses pertama.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO users (telegram_user_id, nama, role, status, created_at, decided_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(telegram_user_id) DO UPDATE SET
+                   role = excluded.role, status = excluded.status""",
+            (telegram_user_id, nama, ROLE_ADMIN, STATUS_ACTIVE, now, now),
+        )
 
 
 def find_by_hash(sha256: str) -> sqlite3.Row | None:
@@ -196,12 +328,17 @@ def awaiting_detail(telegram_user_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def list_by_period(period: str, payment_type: str | None = None) -> list[sqlite3.Row]:
+def list_by_period(period: str, payment_type: str | None = None,
+                   telegram_user_id: int | None = None) -> list[sqlite3.Row]:
+    """Struk satu periode. Tanpa `telegram_user_id`, semua karyawan ikut."""
     query = "SELECT * FROM expenses WHERE period = ? AND status = 'confirmed'"
     params: list[Any] = [period]
     if payment_type:
         query += " AND payment_type = ?"
         params.append(payment_type)
+    if telegram_user_id is not None:
+        query += " AND telegram_user_id = ?"
+        params.append(telegram_user_id)
     query += " ORDER BY txn_date, id"
     with connect() as conn:
         return conn.execute(query, params).fetchall()
@@ -217,15 +354,17 @@ def list_recent(telegram_user_id: int, limit: int = 10) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def summary_by_period(period: str) -> dict[str, dict[str, float]]:
-    with connect() as conn:
-        rows = conn.execute(
-            """SELECT payment_type, COUNT(*) AS n, COALESCE(SUM(jumlah), 0) AS total
+def summary_by_period(period: str,
+                      telegram_user_id: int | None = None) -> dict[str, dict[str, float]]:
+    query = """SELECT payment_type, COUNT(*) AS n, COALESCE(SUM(jumlah), 0) AS total
                FROM expenses
-               WHERE period = ? AND status = 'confirmed'
-               GROUP BY payment_type""",
-            (period,),
-        ).fetchall()
+               WHERE period = ? AND status = 'confirmed'"""
+    params: list[Any] = [period]
+    if telegram_user_id is not None:
+        query += " AND telegram_user_id = ?"
+        params.append(telegram_user_id)
+    with connect() as conn:
+        rows = conn.execute(query + " GROUP BY payment_type", params).fetchall()
     return {r["payment_type"]: {"count": r["n"], "total": r["total"]} for r in rows}
 
 

@@ -37,12 +37,32 @@ ERROR_PAGE = """<!doctype html>
 """
 
 
+def _diagnosa() -> str:
+    """Sebut variabel mana yang hilang - tanpa pernah membocorkan nilainya."""
+    import os
+
+    baris = []
+    for nama in ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"):
+        nilai = os.environ.get(nama)
+        if nilai is None:
+            baris.append(f"{nama:<20} TIDAK ADA di environment")
+        elif not nilai.strip():
+            baris.append(f"{nama:<20} ada tapi KOSONG")
+        else:
+            baris.append(f"{nama:<20} terisi ({len(nilai)} karakter)")
+
+    terkait = sorted(k for k in os.environ if k.startswith(("TURSO", "DASH", "KARYAWAN")))
+    baris.append("")
+    baris.append("Variabel terkait yang terlihat: " + (", ".join(terkait) or "(tidak ada)"))
+    return "\n".join(baris)
+
+
 def _page() -> tuple[int, str]:
     if not cloud.is_configured():
         return 503, ERROR_PAGE.format(
             pesan=("Environment variable <code>TURSO_DATABASE_URL</code> dan "
-                   "<code>TURSO_AUTH_TOKEN</code> belum diisi di project Vercel."),
-            detail="Settings → Environment Variables → tambahkan keduanya → Redeploy.",
+                   "<code>TURSO_AUTH_TOKEN</code> belum terbaca oleh function ini."),
+            detail=_diagnosa(),
         )
 
     try:

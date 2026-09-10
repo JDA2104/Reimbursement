@@ -82,7 +82,38 @@ def _label(ws: Worksheet, row: int, label: str, value: str) -> None:
     cell.alignment = LEFT
 
 
-def _build_sheet(wb: Workbook, sheet_name: str, rows: list[sqlite3.Row], period: str) -> float:
+def profile_of(telegram_user_id: int | None) -> dict[str, str]:
+    """Identitas untuk kepala form.
+
+    Diambil dari tabel users supaya tiap karyawan punya NPK sendiri. Nilai di
+    .env hanya dipakai sebagai cadangan - berguna saat sistem masih dipakai
+    satu orang, atau kalau profil karyawan belum diisi.
+    """
+    fallback = {
+        "nama": config.KARYAWAN_NAMA,
+        "npk": config.KARYAWAN_NPK,
+        "jabatan": config.KARYAWAN_JABATAN,
+        "departemen": config.KARYAWAN_DEPARTEMEN,
+        "perusahaan": config.PERUSAHAAN,
+    }
+    if telegram_user_id is None:
+        return fallback
+
+    row = db.get_user(telegram_user_id)
+    if row is None:
+        return fallback
+
+    return {
+        "nama": row["nama"] or fallback["nama"],
+        "npk": row["npk"] or fallback["npk"],
+        "jabatan": row["jabatan"] or fallback["jabatan"],
+        "departemen": row["departemen"] or fallback["departemen"],
+        "perusahaan": row["perusahaan"] or fallback["perusahaan"],
+    }
+
+
+def _build_sheet(wb: Workbook, sheet_name: str, rows: list[sqlite3.Row], period: str,
+                 profile: dict[str, str]) -> float:
     ws = wb.create_sheet(title=sheet_name)
 
     for col, width in COLUMN_WIDTHS.items():
@@ -100,10 +131,13 @@ def _build_sheet(wb: Workbook, sheet_name: str, rows: list[sqlite3.Row], period:
     sub.alignment = CENTER
 
     # --- Identitas karyawan ---------------------------------------------
-    _label(ws, ROW_HEADER_START + 0, "NPK", config.KARYAWAN_NPK)
-    _label(ws, ROW_HEADER_START + 1, "JABATAN", config.KARYAWAN_JABATAN)
-    _label(ws, ROW_HEADER_START + 2, "DEPARTEMEN", config.KARYAWAN_DEPARTEMEN)
-    _label(ws, ROW_HEADER_START + 3, "PERUSAHAAN", config.PERUSAHAAN)
+    # Nama sengaja tidak ditaruh di sini: form aslinya menempatkannya di blok
+    # tanda tangan "Diajukan oleh". Menambah baris di sini akan menggeser
+    # seluruh layout dan merusak kesamaan dengan template perusahaan.
+    _label(ws, ROW_HEADER_START + 0, "NPK", profile["npk"])
+    _label(ws, ROW_HEADER_START + 1, "JABATAN", profile["jabatan"])
+    _label(ws, ROW_HEADER_START + 2, "DEPARTEMEN", profile["departemen"])
+    _label(ws, ROW_HEADER_START + 3, "PERUSAHAAN", profile["perusahaan"])
 
     # Catatan kecil di kanan atas, seperti di form asli.
     ws.merge_cells(start_row=8, start_column=COL_TUJUAN, end_row=10, end_column=LAST_COL)
@@ -259,7 +293,10 @@ def _build_sheet(wb: Workbook, sheet_name: str, rows: list[sqlite3.Row], period:
     for col, line1, line2 in blocks:
         ws.cell(row=sign_row, column=col, value=line1).font = NORMAL
         ws.cell(row=sign_row + 1, column=col, value=line2).font = NORMAL
-        ws.cell(row=sign_row + 5, column=col, value="Nama    :").font = NORMAL
+        # Nama pemohon sudah diketahui, jadi diisikan; dua blok lainnya
+        # dibiarkan kosong untuk ditulis tangan saat ditandatangani.
+        nama = profile["nama"] if line2 == "Karyawan" else ""
+        ws.cell(row=sign_row + 5, column=col, value=f"Nama    : {nama}").font = NORMAL
         ws.cell(row=sign_row + 6, column=col, value="Tanggal :").font = NORMAL
 
     ws.print_area = f"A1:{get_column_letter(LAST_COL)}{sign_row + 7}"
@@ -270,40 +307,56 @@ def _build_sheet(wb: Workbook, sheet_name: str, rows: list[sqlite3.Row], period:
     return total
 
 
-def report_filename(period: str) -> str:
+def _safe(text: str) -> str:
+    """Buang karakter yang tidak boleh ada di nama berkas Windows."""
+    return "".join(c for c in text if c.isalnum() or c in " -_").strip()
+
+
+def report_filename(period: str, telegram_user_id: int | None = None) -> str:
     year, month = period.split("-")
-    nama = f" {config.KARYAWAN_NAMA}" if config.KARYAWAN_NAMA else ""
-    return f"Reimbursement{nama} {MONTH_ABBR[int(month) - 1]} {year}.xlsx"
+    nama = _safe(profile_of(telegram_user_id)["nama"])
+    bagian = f" {nama}" if nama else ""
+    return f"Reimbursement{bagian} {MONTH_ABBR[int(month) - 1]} {year}.xlsx"
 
 
-def build_workbook(period: str) -> Path:
-    """Bangun ulang form Excel untuk satu periode. Selalu menimpa file lama."""
+def build_workbook(period: str, telegram_user_id: int | None = None) -> Path:
+    """Bangun ulang form Excel satu periode. Selalu menimpa file lama.
+
+    Form Daftar Nominatif itu dokumen per orang - satu NPK, satu tanda tangan -
+    jadi tiap karyawan mendapat berkasnya sendiri. Tanpa `telegram_user_id`,
+    seluruh karyawan digabung; itu hanya masuk akal saat sistem dipakai
+    satu orang.
+    """
     wb = Workbook()
     wb.remove(wb.active)
+    profile = profile_of(telegram_user_id)
 
     for payment_type, sheet_name in config.SHEET_NAMES.items():
-        _build_sheet(wb, sheet_name, db.list_by_period(period, payment_type), period)
+        rows = db.list_by_period(period, payment_type, telegram_user_id)
+        _build_sheet(wb, sheet_name, rows, period, profile)
 
     wb.properties.title = f"Form Reimbursement {period_label(period)}"
     wb.properties.created = datetime.now()
 
-    out_path = config.EXPORT_DIR / report_filename(period)
+    out_path = config.EXPORT_DIR / report_filename(period, telegram_user_id)
     wb.save(out_path)
     return out_path
 
 
-def build_photo_archive(period: str) -> Path | None:
+def build_photo_archive(period: str, telegram_user_id: int | None = None) -> Path | None:
     """Kumpulkan foto struk satu periode ke dalam .zip.
 
     Nama file di dalam zip diawali nomor baris, jadi baris 1 di sheet
     Reimbursement bersesuaian dengan `Reimbursement/001_...`.
     """
-    out_path = config.EXPORT_DIR / f"Struk_{period}.zip"
+    suffix = f"_{telegram_user_id}" if telegram_user_id is not None else ""
+    out_path = config.EXPORT_DIR / f"Struk_{period}{suffix}.zip"
     written = 0
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for payment_type, sheet_name in config.SHEET_NAMES.items():
-            for idx, row in enumerate(db.list_by_period(period, payment_type), start=1):
+            rows = db.list_by_period(period, payment_type, telegram_user_id)
+            for idx, row in enumerate(rows, start=1):
                 photo = Path(row["photo_path"])
                 if not photo.exists():
                     continue
@@ -319,5 +372,7 @@ def build_photo_archive(period: str) -> Path | None:
     return out_path
 
 
-def build_all(period: str) -> tuple[Path, Path | None]:
-    return build_workbook(period), build_photo_archive(period)
+def build_all(period: str,
+              telegram_user_id: int | None = None) -> tuple[Path, Path | None]:
+    return (build_workbook(period, telegram_user_id),
+            build_photo_archive(period, telegram_user_id))

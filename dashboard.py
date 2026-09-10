@@ -23,18 +23,27 @@ from render import render, summarize   # noqa: E402  (perlu WEB_DIR lebih dulu)
 __all__ = ["build_dashboard", "local_rows", "render", "summarize"]
 
 
-def local_rows() -> list[dict[str, Any]]:
-    """Semua baris dari SQLite, sebagai dict biasa."""
+def local_rows(telegram_user_id: int | None = None) -> list[dict[str, Any]]:
+    """Baris dari SQLite sebagai dict biasa.
+
+    Tanpa `telegram_user_id`, seluruh karyawan ikut - itu tampilan admin.
+    Karyawan biasa hanya boleh melihat datanya sendiri.
+    """
+    query = "SELECT * FROM expenses WHERE status != 'deleted'"
+    params: list[Any] = []
+    if telegram_user_id is not None:
+        query += " AND telegram_user_id = ?"
+        params.append(telegram_user_id)
     with db.connect() as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM expenses WHERE status != 'deleted'"
-        )]
+        return [dict(r) for r in conn.execute(query, params)]
 
 
-def build_dashboard(months: int = 6, period: str | None = None) -> Path:
+def build_dashboard(months: int = 6, period: str | None = None,
+                    telegram_user_id: int | None = None) -> Path:
     """Tulis dashboard sebagai file HTML mandiri. Kembalikan lokasinya."""
     period = period or date.today().strftime("%Y-%m")
-    page = render(summarize(local_rows(), period, months))
-    out_path = config.EXPORT_DIR / f"Dashboard_{period}.html"
+    page = render(summarize(local_rows(telegram_user_id), period, months))
+    suffix = f"_{telegram_user_id}" if telegram_user_id is not None else ""
+    out_path = config.EXPORT_DIR / f"Dashboard_{period}{suffix}.html"
     out_path.write_text(page, encoding="utf-8")
     return out_path

@@ -246,7 +246,7 @@ def _render_page(entries: list[tuple[Image.Image, str]], title: str) -> Image.Im
     return page
 
 
-def build_contact_sheet(period: str) -> Path | None:
+def build_contact_sheet(period: str, telegram_user_id: int | None = None) -> Path | None:
     """Bangun PDF berisi semua struk satu periode, berurutan tanggal.
 
     Sheet Reimbursement dan Kartu Kredit dipisah, tiap halaman memuat 9 struk.
@@ -255,7 +255,7 @@ def build_contact_sheet(period: str) -> Path | None:
     pages: list[Image.Image] = []
 
     for payment_type, sheet_name in config.SHEET_NAMES.items():
-        rows = db.list_by_period(period, payment_type)   # sudah urut tanggal
+        rows = db.list_by_period(period, payment_type, telegram_user_id)  # urut tanggal
         if not rows:
             continue
 
@@ -281,7 +281,8 @@ def build_contact_sheet(period: str) -> Path | None:
     if not pages:
         return None
 
-    out_path = config.EXPORT_DIR / f"Lampiran_Struk_{period}.pdf"
+    suffix = f"_{telegram_user_id}" if telegram_user_id is not None else ""
+    out_path = config.EXPORT_DIR / f"Lampiran_Struk_{period}{suffix}.pdf"
     pages[0].save(
         out_path, "PDF", resolution=DPI, save_all=True, append_images=pages[1:]
     )

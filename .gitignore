@@ -23,3 +23,6 @@ data/
 *.db
 *.xlsx
 *.log
+
+.vercel
+.env*
