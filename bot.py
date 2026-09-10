@@ -14,12 +14,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
-from telegram.ext import (
+# HARUS di atas semua import lokal. Modul bersama (cloud, render, periods) ada
+# di web/ supaya serverless Vercel bisa memakai kode yang sama; folder itu perlu
+# masuk path sebelum modul mana pun yang mengimpornya. Jangan pindahkan blok ini
+# ke bawah - `import cloud` akan gagal karena urutan alfabetis mendahului config.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "web"))
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram.constants import ChatAction  # noqa: E402
+from telegram.ext import (  # noqa: E402
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -28,14 +35,14 @@ from telegram.ext import (
     filters,
 )
 
-import cloud
-import config
-import dashboard
-import db
-import excel_report
-import extractor
-import mailer
-import receipt_image
+import cloud  # noqa: E402
+import config  # noqa: E402
+import dashboard  # noqa: E402
+import db  # noqa: E402
+import excel_report  # noqa: E402
+import extractor  # noqa: E402
+import mailer  # noqa: E402
+import receipt_image  # noqa: E402
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s", level=logging.INFO
