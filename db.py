@@ -95,6 +95,27 @@ def find_by_hash(sha256: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def find_similar(merchant: str, txn_date: str, jumlah: float,
+                 exclude_id: int | None = None) -> sqlite3.Row | None:
+    """Cari klaim dengan merchant, tanggal, dan nominal sama.
+
+    Hash foto hanya menangkap file yang identik. Struk yang sama difoto dua kali
+    menghasilkan hash berbeda, jadi kecocokan isi inilah yang mencegah satu
+    pengeluaran diklaim dua kali.
+    """
+    query = """SELECT * FROM expenses
+               WHERE status != 'deleted'
+                 AND lower(merchant) = lower(?)
+                 AND txn_date = ?
+                 AND abs(jumlah - ?) < 1"""
+    params: list[Any] = [merchant, txn_date, jumlah]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    with connect() as conn:
+        return conn.execute(query + " ORDER BY id LIMIT 1", params).fetchone()
+
+
 def insert_expense(data: dict[str, Any], photo_sha256: str) -> int:
     with connect() as conn:
         cur = conn.execute(

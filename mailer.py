@@ -65,8 +65,10 @@ def _body(period: str) -> str:
         "",
         "Lampiran:",
         "  - Form Excel berisi 2 sheet: Reimbursement dan Kartu Kredit.",
-        "  - File ZIP berisi foto struk. Nomor di depan nama file sesuai nomor",
-        "    baris di sheet yang bersangkutan, contoh Reimbursement/003_... = baris 3.",
+        "  - PDF lampiran struk: semua struk sudah dipotong dari latar dan disusun",
+        "    berurutan tanggal, siap dicetak. Label R-01, K-01, dst. sesuai nomor",
+        "    baris di sheet yang bersangkutan.",
+        "  - File ZIP berisi foto struk asli resolusi penuh, untuk keperluan audit.",
         "",
         "Dikirim otomatis oleh bot reimbursement.",
     ]
@@ -76,7 +78,7 @@ def _body(period: str) -> str:
 
 
 def send_report(period: str, excel_path: Path, zip_path: Path | None,
-                sender_name: str = "") -> list[str]:
+                pdf_path: Path | None = None, sender_name: str = "") -> list[str]:
     """Kirim rekap ke penerima yang dikonfigurasi. Kembalikan daftar penerima."""
     check_config()
 
@@ -90,6 +92,8 @@ def send_report(period: str, excel_path: Path, zip_path: Path | None,
     msg.set_content(_body(period))
 
     _attach(msg, excel_path)
+    if pdf_path is not None:
+        _attach(msg, pdf_path)
     if zip_path is not None:
         _attach(msg, zip_path)
 

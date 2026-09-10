@@ -87,6 +87,8 @@ Foto dikirim terpisah dalam ZIP, dinamai sesuai nomor barisnya —
 | [bot.py](bot.py) | Bot Telegram — alur 3 tahap, command, tombol inline |
 | [extractor.py](extractor.py) | OpenAI vision (baca struk) + pemilah kalimat bebas |
 | [excel_report.py](excel_report.py) | Bangun form Excel 2 sheet + ZIP foto |
+| [receipt_image.py](receipt_image.py) | Potong struk dari latar + susun lembar lampiran PDF |
+| [dashboard.py](dashboard.py) | Dashboard HTML mandiri untuk tracking per bulan & per karyawan |
 | [db.py](db.py) | Skema & query SQLite |
 | [mailer.py](mailer.py) | Kirim form via SMTP dengan lampiran |
 | [config.py](config.py) | Semua setting, dibaca dari `.env` |
@@ -155,11 +157,50 @@ laptop atau PC kantor yang menyala.
 | *(kirim foto)* | Catat struk baru |
 | `/rekap` | Ringkasan bulan ini |
 | `/rekap 2026-07` | Ringkasan bulan tertentu |
-| `/excel` | Kirim form Excel + ZIP ke chat ini |
+| `/excel` | Form Excel + lampiran PDF + ZIP foto asli |
+| `/lembar` | Lembar lampiran struk saja (PDF, siap cetak) |
+| `/dashboard` | Dashboard tracking (HTML, buka di browser) |
 | `/kirim` | Email form ke `EMAIL_TO` (minta konfirmasi dulu) |
 | `/list` | 10 entri terakhir beserta ID-nya |
 | `/hapus 12` | Hapus entri `#12` |
 | `/batal` | Batalkan struk yang sedang ditanyakan |
+
+---
+
+## Lembar Lampiran Struk
+
+`/lembar` menghasilkan PDF A4 berisi semua struk satu periode: **dipotong dari
+latar** (tangan, meja, lantai), diurutkan tanggal, diberi label `R-01`, `K-01`
+yang cocok dengan nomor baris di form Excel. Tata letaknya adaptif — tiga struk
+melebar satu baris, sembilan struk jadi grid 3×3, lebih dari itu pindah halaman.
+
+Pemotongannya memakai fakta bahwa **kertas struk hampir tidak punya saturasi
+warna**, sedangkan kulit tangan dan meja kayu selalu hangat. Deteksi lewat kanal
+saturasi HSV jauh lebih andal daripada lewat kecerahan — lantai kayu yang terang
+ikut terbaca sebagai "putih" kalau memakai ambang kecerahan.
+
+Ini heuristik, bukan model AI. Akan meleset kalau struk difoto di atas **meja
+putih**, atau kertasnya kusam kekuningan. Kalau gagal, kode jatuh ke foto asli
+tanpa dipotong — tidak pernah memotong struknya sendiri. Parameternya
+(`SAT_MAX`, `VAL_MIN`, `ROW_MAX_FRAC`) ada di atas [receipt_image.py](receipt_image.py).
+
+> Hasil terbaik: foto di atas permukaan **gelap dan kontras**, tanpa tangan menutupi.
+
+---
+
+## Dashboard
+
+`/dashboard` menghasilkan satu file HTML mandiri — tanpa server, tanpa internet,
+tanpa pustaka eksternal. Isinya:
+
+- **Hero** — total bulan berjalan + perubahan % dari bulan lalu
+- **Stat tiles** — jumlah struk, total Reimbursement, total Kartu Kredit, struk belum lengkap
+- **Grafik batang** — pengeluaran per bulan, ditumpuk per jenis pembayaran, dengan tooltip
+- **Rekap per karyawan** — tiap karyawan × bulan, dipecah R/K
+- **Tabel struk** bulan berjalan
+
+Ikut mode gelap/terang browser. Warna dua deretnya sudah divalidasi aman untuk
+buta warna di kedua mode.
 
 ---
 
@@ -171,7 +212,10 @@ Sistem ini menyimpan data finansial asli, jadi:
 - Bot memakai **allowlist**: hanya user ID di `ALLOWED_TELEGRAM_USER_IDS` yang dilayani.
   Default kosong, artinya menolak semua orang sampai sengaja diisi — bot Telegram itu
   publik, siapa pun yang tahu namanya bisa mengirim chat.
-- Struk duplikat ditolak otomatis lewat hash SHA-256 file foto.
+- Struk duplikat ditangkap dua lapis: **hash SHA-256** menolak file foto yang
+  identik, dan kecocokan **merchant + tanggal + nominal** memberi peringatan saat
+  struk yang sama difoto ulang (byte berbeda, hash lolos). Lapis kedua hanya
+  memperingatkan, tidak menolak — dua struk identik yang sah memang mungkin.
 - Hapus bersifat **soft delete** — data tetap ada di database untuk jejak audit.
 - Untuk Gmail, gunakan **App Password**, bukan password akun utama.
 
