@@ -88,7 +88,11 @@ Foto dikirim terpisah dalam ZIP, dinamai sesuai nomor barisnya —
 | [extractor.py](extractor.py) | OpenAI vision (baca struk) + pemilah kalimat bebas |
 | [excel_report.py](excel_report.py) | Bangun form Excel 2 sheet + ZIP foto |
 | [receipt_image.py](receipt_image.py) | Potong struk dari latar + susun lembar lampiran PDF |
-| [dashboard.py](dashboard.py) | Dashboard HTML mandiri untuk tracking per bulan & per karyawan |
+| [dashboard.py](dashboard.py) | Jalur lokal dashboard: baca SQLite, tulis HTML |
+| [web/render.py](web/render.py) | Perenderan dashboard (murni, nol dependency) — dipakai lokal & Vercel |
+| [web/cloud.py](web/cloud.py) | Klien Turso lewat HTTP API |
+| [web/api/index.py](web/api/index.py) | Serverless function Vercel |
+| [web/middleware.js](web/middleware.js) | Basic auth di edge |
 | [db.py](db.py) | Skema & query SQLite |
 | [mailer.py](mailer.py) | Kirim form via SMTP dengan lampiran |
 | [config.py](config.py) | Semua setting, dibaca dari `.env` |
@@ -160,6 +164,7 @@ laptop atau PC kantor yang menyala.
 | `/excel` | Form Excel + lampiran PDF + ZIP foto asli |
 | `/lembar` | Lembar lampiran struk saja (PDF, siap cetak) |
 | `/dashboard` | Dashboard tracking (HTML, buka di browser) |
+| `/sync` | Kirim ulang data ke database cloud |
 | `/kirim` | Email form ke `EMAIL_TO` (minta konfirmasi dulu) |
 | `/list` | 10 entri terakhir beserta ID-nya |
 | `/hapus 12` | Hapus entri `#12` |
@@ -190,8 +195,7 @@ tanpa dipotong — tidak pernah memotong struknya sendiri. Parameternya
 
 ## Dashboard
 
-`/dashboard` menghasilkan satu file HTML mandiri — tanpa server, tanpa internet,
-tanpa pustaka eksternal. Isinya:
+Isinya:
 
 - **Hero** — total bulan berjalan + perubahan % dari bulan lalu
 - **Stat tiles** — jumlah struk, total Reimbursement, total Kartu Kredit, struk belum lengkap
@@ -201,6 +205,88 @@ tanpa pustaka eksternal. Isinya:
 
 Ikut mode gelap/terang browser. Warna dua deretnya sudah divalidasi aman untuk
 buta warna di kedua mode.
+
+Bisa dipakai dua cara, dengan **kode perenderan yang sama persis**:
+
+| | Lokal | Vercel |
+|---|---|---|
+| Perintah | `/dashboard` | buka URL-nya |
+| Sumber data | SQLite di laptop | Turso (database cloud) |
+| Hasil | file HTML mandiri | halaman live |
+| Akses | file di mesinmu | basic auth |
+
+`web/render.py` berisi `summarize()` dan `render()` yang murni — bekerja di atas
+daftar dict biasa, tidak tahu-menahu soal sumber datanya. `dashboard.py` memberinya
+baris dari SQLite; `web/api/index.py` memberinya baris dari Turso. Satu kode, dua jalur.
+
+---
+
+## Deploy Dashboard ke Vercel
+
+> ⚠️ Dashboard berisi **nominal asli, nama merchant, nama klien yang dijamu, dan NPK**.
+> Vercel itu hosting publik. Basic auth di `web/middleware.js` berjalan di *edge* —
+> sebelum serverless function mana pun dijalankan — jadi pengunjung yang belum lolos
+> tidak menerima satu byte pun data. Kalau `DASH_USER`/`DASH_PASS` belum diisi,
+> seluruh situs ditutup, bukan dibuka.
+
+### 1. Buat database cloud (Turso, gratis)
+
+1. Daftar di https://turso.tech
+2. **Create Database** → pilih region terdekat (Singapore)
+3. **Connect** → salin **Database URL** dan **Auth Token**
+4. Masukkan ke `.env` lokal sebagai `TURSO_DATABASE_URL` dan `TURSO_AUTH_TOKEN`
+5. Restart bot, lalu kirim **`/sync`** di Telegram
+
+Setelah itu tiap entri baru otomatis ikut tersalin — `/sync` hanya perlu sekali di awal
+atau kalau ingin memaksa kirim ulang semuanya.
+
+### 2. Deploy
+
+```powershell
+npm i -g vercel
+cd "C:\Users\juan.davis\Downloads\Reimbursement\web"
+vercel
+```
+
+Saat ditanya, jawab: link ke project baru, **Root Directory = folder ini** (`web`).
+
+### 3. Isi Environment Variables di Vercel
+
+Dashboard → project → **Settings → Environment Variables**:
+
+| Variable | Isi |
+|---|---|
+| `TURSO_DATABASE_URL` | sama dengan di `.env` |
+| `TURSO_AUTH_TOKEN` | sama dengan di `.env` |
+| `DASH_USER` | username untuk membuka dashboard |
+| `DASH_PASS` | password — **panjang dan acak**, bukan password yang kamu pakai di tempat lain |
+| `KARYAWAN_NAMA`, `KARYAWAN_NPK`, `KARYAWAN_DEPARTEMEN`, `PERUSAHAAN` | untuk kepala halaman |
+
+Lalu **Redeploy** supaya variabelnya terbaca.
+
+```powershell
+vercel --prod
+```
+
+### Kenapa `web/` folder terpisah
+
+Vercel meng-install `requirements.txt` dan membatasi bundle serverless 250 MB.
+Kalau di-deploy dari root, `opencv`, `Pillow`, `openpyxl`, `openai`, dan
+`python-telegram-bot` ikut terpasang dan deploy gagal karena ukuran.
+
+`web/` sengaja **nol dependency** — hanya pustaka standar Python: `urllib` untuk
+menghubungi Turso, `html`/`datetime` untuk merender. `web/requirements.txt`
+memang kosong.
+
+### Apa yang TIDAK ikut ke cloud
+
+`cloud.py` hanya menyalin 20 kolom yang dibutuhkan dashboard. **Foto struk tidak
+pernah meninggalkan laptopmu** — `photo_path` dan `raw_json` sengaja dikecualikan.
+Yang tersalin hanya angka dan teks rekap.
+
+SQLite lokal tetap sumber kebenaran. Sinkronisasi satu arah dan idempoten: baris
+yang dihapus di lokal ikut terhapus di cloud pada sync berikutnya. Kalau internet
+mati, bot tetap jalan penuh — kegagalan sync dicatat di log, tidak menghentikan apa pun.
 
 ---
 

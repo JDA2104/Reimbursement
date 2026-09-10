@@ -1,0 +1,9 @@
+# Sengaja kosong.
+#
+# Dashboard di Vercel hanya memakai pustaka standar Python: urllib untuk
+# menghubungi Turso, html/datetime untuk merender halaman. Tidak ada openpyxl,
+# Pillow, opencv, maupun openai di sini - semuanya milik bot yang jalan lokal.
+#
+# Ini disengaja: bundle serverless Vercel dibatasi 250 MB, dan opencv saja
+# sudah puluhan MB. Menjaga folder ini nol-dependency membuat deploy cepat
+# dan tidak pernah gagal karena ukuran.

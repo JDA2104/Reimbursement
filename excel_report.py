@@ -66,25 +66,11 @@ MONEY_FMT = "#,##0"
 CATATAN = ("setelah karyawan selesai melakukan perjalanan dinas dengan "
            "melampirkan semua bukti transaksi/pembayaran asli")
 
-MONTH_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
-            "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
-MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-
-def period_label(period: str) -> str:
-    """'2026-08' -> 'Agustus 2026'."""
-    year, month = period.split("-")
-    return f"{MONTH_ID[int(month) - 1]} {year}"
-
-
-def _fmt_date(iso: str) -> str:
-    """'2026-08-14' -> '14-Aug-26', mengikuti format di form asli."""
-    try:
-        d = date.fromisoformat(iso)
-    except (ValueError, TypeError):
-        return iso
-    return f"{d.day:02d}-{MONTH_ABBR[d.month - 1]}-{d:%y}"
+# Nama bulan hidup di web/periods.py supaya bot dan dashboard Vercel memakai
+# definisi yang sama, bukan dua salinan yang bisa melenceng. Di-re-export
+# karena receipt_image.py memanggilnya lewat modul ini.
+from periods import MONTH_ABBR, period_label  # noqa: F401,E402
+from periods import fmt_date as _fmt_date     # noqa: E402
 
 
 def _label(ws: Worksheet, row: int, label: str, value: str) -> None:

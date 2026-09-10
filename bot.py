@@ -28,6 +28,7 @@ from telegram.ext import (
     filters,
 )
 
+import cloud
 import config
 import dashboard
 import db
@@ -101,6 +102,7 @@ Setelah itu ketik satu kalimat berisi detail jamuan (atau `-` kalau bukan jamuan
 /excel `[YYYY-MM]` — kirim form Excel + lampiran struk ke chat ini
 /lembar `[YYYY-MM]` — lembar struk saja (PDF, urut tanggal, siap cetak)
 /dashboard `[YYYY-MM]` — dashboard tracking (HTML, buka di browser)
+/sync — kirim ulang data ke database cloud
 /kirim `[YYYY-MM]` — email form ke petugas pengumpul
 /list — 10 entri terakhir
 /hapus `<id>` — hapus satu entri
@@ -178,6 +180,52 @@ async def cmd_excel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             document=zip_path.open("rb"), filename=zip_path.name,
             caption="🖼 Foto asli resolusi penuh (untuk audit)",
         )
+
+
+async def _push_to_cloud() -> int | None:
+    """Salin baris lokal ke Turso. Diam saja kalau cloud belum dikonfigurasi.
+
+    Dipanggil setelah tiap entri selesai supaya dashboard Vercel ikut terbarui.
+    Kegagalan sengaja tidak dilempar ke atas - bot harus tetap jalan meski
+    internet mati; SQLite lokal tetap sumber kebenarannya.
+    """
+    if not cloud.is_configured():
+        return None
+    try:
+        rows = await asyncio.to_thread(dashboard.local_rows)
+        return await asyncio.to_thread(cloud.sync_from_local, rows)
+    except Exception:
+        log.exception("Sinkronisasi ke cloud gagal")
+        return None
+
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kirim ulang seluruh data lokal ke database cloud."""
+    if not is_allowed(update):
+        return await deny(update)
+
+    if not cloud.is_configured():
+        await update.message.reply_text(
+            "⚙️ Database cloud belum diatur.\n"
+            "Isi `TURSO_DATABASE_URL` dan `TURSO_AUTH_TOKEN` di file .env, "
+            "lalu restart bot.",
+            parse_mode="Markdown",
+        )
+        return
+
+    status = await update.message.reply_text("☁️ Mengirim data ke cloud...")
+    try:
+        rows = await asyncio.to_thread(dashboard.local_rows)
+        count = await asyncio.to_thread(cloud.sync_from_local, rows)
+    except Exception as exc:
+        log.exception("Sinkronisasi manual gagal")
+        await status.edit_text(f"❌ Gagal:\n`{exc}`", parse_mode="Markdown")
+        return
+
+    await status.edit_text(
+        f"✅ {count} baris terkirim ke database cloud.\n"
+        "Dashboard di Vercel sudah menampilkan data terbaru."
+    )
 
 
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -508,6 +556,7 @@ async def _finish(update: Update, pending) -> None:
     """Tutup satu entri: bangun ulang Excel, lalu laporkan posisi terbaru."""
     row = db.get_expense(pending["id"])
     await asyncio.to_thread(excel_report.build_workbook, row["period"])
+    await _push_to_cloud()
 
     sheet = config.SHEET_NAMES[row["payment_type"]]
     stats = db.summary_by_period(row["period"]).get(
@@ -607,6 +656,7 @@ def main() -> None:
     app.add_handler(CommandHandler("excel", cmd_excel))
     app.add_handler(CommandHandler("lembar", cmd_lembar))
     app.add_handler(CommandHandler("dashboard", cmd_dashboard))
+    app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("kirim", cmd_kirim))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("hapus", cmd_hapus))

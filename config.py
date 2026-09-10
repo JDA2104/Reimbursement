@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,6 +12,12 @@ load_dotenv()
 
 # --- Lokasi file ---------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
+
+# Folder web/ berisi modul bersama yang juga dipakai serverless Vercel
+# (perenderan dashboard, klien Turso, penamaan bulan). Modul-modul itu hanya
+# memakai pustaka standar; menaruhnya di path di sini membuat bot dan Vercel
+# memakai kode yang sama persis, bukan dua salinan yang bisa melenceng.
+sys.path.insert(0, str(BASE_DIR / "web"))
 DATA_DIR = BASE_DIR / "data"
 PHOTO_DIR = DATA_DIR / "photos"
 INBOX_DIR = PHOTO_DIR / "inbox"        # foto baru, sebelum user pilih R atau K
